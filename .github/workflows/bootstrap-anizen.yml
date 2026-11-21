@@ -1,0 +1,100 @@
+name: Temporary Kikune source bootstrap
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/bootstrap-anizen.yml
+
+permissions:
+  contents: write
+
+jobs:
+  import-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Kikune
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import AniZen source
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 \
+            https://github.com/salmanbappi/AniZen/archive/refs/heads/master.zip \
+            -o /tmp/anizen.zip
+          mkdir -p /tmp/anizen
+          unzip -q /tmp/anizen.zip -d /tmp/anizen
+          rsync -a --exclude='README.md' /tmp/anizen/AniZen-master/ ./
+
+      - name: Apply Kikune identity and build compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str, required: bool = True) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              if old not in text:
+                  if required:
+                      raise SystemExit(f"Expected text not found in {path}: {old}")
+                  return
+              file.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          replace_once("settings.gradle.kts", 'rootProject.name = "AniZen"', 'rootProject.name = "Kikune"')
+          replace_once(
+              "settings.gradle.kts",
+              "pluginManagement {\n",
+              """pluginManagement {
+              // Kotlin 2.4 metadata requires R8 9.1.29 or newer.
+              buildscript {
+                  repositories {
+                      google()
+                      mavenCentral()
+                  }
+                  dependencies {
+                      classpath("com.android.tools:r8:9.1.31")
+                  }
+              }
+          """,
+          )
+          replace_once("app/build.gradle.kts", 'applicationId = "app.anizen"', 'applicationId = "app.kikune"')
+          replace_once("app/build.gradle.kts", "versionCode = 720", "versionCode = 1")
+          replace_once("app/build.gradle.kts", 'versionName = "0.5.220"', 'versionName = "0.1.0"')
+          replace_once(
+              "app/build.gradle.kts",
+              'manifestPlaceholders["author"] = "@salmanbappi"',
+              'manifestPlaceholders["author"] = "Kikune"',
+              required=False,
+          )
+          replace_once("app/build.gradle.kts", 'storeFile = file("anizen.jks")', 'storeFile = file("kikune.jks")')
+          replace_once(
+              "i18n/src/commonMain/moko-resources/base/strings.xml",
+              '<string name="app_name" translatable="false">AniZen</string>',
+              '<string name="app_name" translatable="false">Kikune</string>',
+          )
+          replace_once(
+              "app/src/beta/res/values/strings.xml",
+              "AniZen Preview",
+              "Kikune Preview",
+              required=False,
+          )
+          Path("app/anizen.jks").unlink(missing_ok=True)
+          PY
+
+      - name: Commit imported source and remove this temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Import AniZen source and bootstrap Kikune"
+          git rm .github/workflows/bootstrap-anizen.yml
+          git commit -m "Remove temporary source bootstrap workflow"
+          git push origin HEAD:main
