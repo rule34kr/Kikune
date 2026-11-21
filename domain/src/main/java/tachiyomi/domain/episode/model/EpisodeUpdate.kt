@@ -1,0 +1,47 @@
+package tachiyomi.domain.episode.model
+
+data class EpisodeUpdate(
+    val id: Long,
+    val animeId: Long? = null,
+    val seen: Boolean? = null,
+    val bookmark: Boolean? = null,
+    // AM (FILLERMARK) -->
+    val fillermark: Boolean? = null,
+    // AM (FILLERMARK) <--
+    val lastSecondSeen: Long? = null,
+    val totalSeconds: Long? = null,
+    val dateFetch: Long? = null,
+    val sourceOrder: Long? = null,
+    val url: String? = null,
+    val name: String? = null,
+    val dateUpload: Long? = null,
+    val episodeNumber: Double? = null,
+    val scanlator: String? = null,
+    val summary: String? = null,
+    val previewUrl: String? = null,
+    val version: Long? = null,
+)
+
+fun Episode.toEpisodeUpdate(): EpisodeUpdate {
+    return EpisodeUpdate(
+        id = id,
+        animeId = animeId,
+        seen = seen,
+        bookmark = bookmark,
+        // AM (FILLERMARK) -->
+        fillermark = fillermark,
+        // AM (FILLERMARK) <--
+        lastSecondSeen = lastSecondSeen,
+        totalSeconds = totalSeconds,
+        dateFetch = dateFetch,
+        sourceOrder = sourceOrder,
+        url = url,
+        name = name,
+        dateUpload = dateUpload,
+        episodeNumber = episodeNumber,
+        scanlator = scanlator,
+        summary = summary,
+        previewUrl = previewUrl,
+        version = version,
+    )
+}

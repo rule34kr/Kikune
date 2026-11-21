@@ -1,0 +1,470 @@
+package eu.kanade.tachiyomi
+
+import android.annotation.SuppressLint
+import android.app.Application
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.os.Looper
+import android.webkit.WebView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.lifecycleScope
+import androidx.work.Configuration
+import androidx.work.WorkManager
+import coil3.ImageLoader
+import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
+import coil3.memory.MemoryCache
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.request.allowRgb565
+import coil3.request.crossfade
+import coil3.util.DebugLogger
+import com.elvishew.xlog.LogConfiguration
+import com.elvishew.xlog.LogLevel
+import com.elvishew.xlog.XLog
+import com.elvishew.xlog.printer.AndroidPrinter
+import com.elvishew.xlog.printer.Printer
+import com.elvishew.xlog.printer.file.backup.NeverBackupStrategy
+import com.elvishew.xlog.printer.file.naming.DateFileNameGenerator
+import com.hippo.unifile.UniFile
+import dev.mihon.injekt.patchInjekt
+import eu.kanade.domain.DomainModule
+import eu.kanade.domain.KMKDomainModule
+import eu.kanade.domain.SYDomainModule
+import eu.kanade.domain.base.BasePreferences
+import eu.kanade.domain.sync.SyncPreferences
+import eu.kanade.domain.ui.UiPreferences
+import eu.kanade.domain.ui.model.setAppCompatDelegateThemeMode
+import eu.kanade.presentation.anime.components.CoverSettings
+import eu.kanade.tachiyomi.core.security.PrivacyPreferences
+import eu.kanade.tachiyomi.crash.CrashActivity
+import eu.kanade.tachiyomi.crash.GlobalExceptionHandler
+import eu.kanade.tachiyomi.data.coil.AnimeBackgroundKeyer
+import eu.kanade.tachiyomi.data.coil.AnimeCoverFetcher
+import eu.kanade.tachiyomi.data.coil.AnimeCoverKeyer
+import eu.kanade.tachiyomi.data.coil.AnimeKeyer
+import eu.kanade.tachiyomi.data.coil.BufferedSourceFetcher
+import eu.kanade.tachiyomi.data.coil.TachiyomiImageDecoder
+import eu.kanade.tachiyomi.data.connections.discord.DiscordRPCService
+import eu.kanade.tachiyomi.data.download.DownloadManager
+import eu.kanade.tachiyomi.data.notification.Notifications
+import eu.kanade.tachiyomi.data.sync.SyncDataJob
+import eu.kanade.tachiyomi.di.AppModule
+import eu.kanade.tachiyomi.di.PreferenceModule
+import eu.kanade.tachiyomi.di.SYPreferenceModule
+import eu.kanade.tachiyomi.extension.ExtensionManager
+import eu.kanade.tachiyomi.network.NetworkHelper
+import eu.kanade.tachiyomi.network.NetworkPreferences
+import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
+import eu.kanade.tachiyomi.util.system.CoverColorObserver
+import eu.kanade.tachiyomi.util.system.WebViewUtil
+import eu.kanade.tachiyomi.util.system.animatorDurationScale
+import eu.kanade.tachiyomi.util.system.cancelNotification
+import eu.kanade.tachiyomi.util.system.isDebugBuildType
+import eu.kanade.tachiyomi.util.system.isPreviewBuildType
+import eu.kanade.tachiyomi.util.system.isTv
+import eu.kanade.tachiyomi.util.system.notify
+import exh.log.CrashlyticsPrinter
+import exh.log.EHLogLevel
+import exh.log.EnhancedFilePrinter
+import exh.log.XLogLogcatLogger
+import exh.log.xLogD
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
+import logcat.LogPriority
+import logcat.LogcatLogger
+import mihon.core.migration.Migrator
+import mihon.core.migration.migrations.migrations
+import mihon.telemetry.TelemetryConfig
+import okio.Path.Companion.toPath
+import org.conscrypt.Conscrypt
+import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.core.common.preference.Preference
+import tachiyomi.core.common.preference.PreferenceStore
+import tachiyomi.core.common.util.lang.withUIContext
+import tachiyomi.core.common.util.system.logcat
+import tachiyomi.data.Database
+import tachiyomi.domain.anime.repository.CustomAnimeRepository
+import tachiyomi.domain.source.service.SourceManager
+import tachiyomi.domain.storage.service.StorageManager
+import tachiyomi.i18n.MR
+import tachiyomi.presentation.core.util.TvDevice
+import tachiyomi.presentation.widget.WidgetManager
+import timber.log.Timber
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
+import uy.kohesive.injekt.injectLazy
+import java.io.File
+import java.security.Security
+import java.text.SimpleDateFormat
+import java.util.Locale
+
+class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factory {
+
+    private val basePreferences: BasePreferences by injectLazy()
+    private val privacyPreferences: PrivacyPreferences by injectLazy()
+    private val networkPreferences: NetworkPreferences by injectLazy()
+
+    private val disableIncognitoReceiver = DisableIncognitoReceiver()
+
+    @SuppressLint("LaunchActivityFromNotification")
+    override fun onCreate() {
+        registerActivityLifecycleCallbacks(eu.kanade.tachiyomi.network.interceptor.ActivityTracker)
+
+        super<Application>.onCreate()
+        patchInjekt()
+
+        Injekt.importModule(PreferenceModule(this))
+        Injekt.importModule(AppModule(this))
+        Injekt.importModule(DomainModule())
+        Injekt.importModule(SYPreferenceModule(this))
+        Injekt.importModule(SYDomainModule())
+        Injekt.importModule(KMKDomainModule())
+
+        setupExhLogging()
+        LogcatLogger.install(XLogLogcatLogger())
+
+        // Resolved once here so the D-pad focus-highlight modifiers, which are applied to
+        // every grid cell and list row, can short-circuit on touch devices without doing
+        // per-item work.
+        TvDevice.isTv = isTv()
+
+        // Mirror the cover-related preferences into snapshot state once, instead of every
+        // cover composable doing a DI lookup + SharedPreferences read per item.
+        CoverSettings.init(
+            uiPreferences = Injekt.get(),
+            scope = ProcessLifecycleOwner.get().lifecycleScope,
+        )
+
+        // Startup Optimization: Initialize non-critical components on background thread
+        ProcessLifecycleOwner.get().lifecycleScope.launch(Dispatchers.IO) {
+            // KMK -->
+            // Warm the cover color/ratio cache so the first library scroll is already
+            // smooth instead of extracting + measuring on the fly.
+            CoverColorObserver.load() // KMK
+            // KMK <--
+
+            setupNotificationChannels()
+            if (!WorkManager.isInitialized()) {
+                WorkManager.initialize(this@App, Configuration.Builder().build())
+            }
+            initializeMigrator()
+
+            // Eagerly initialize expensive singletons on background thread
+            Injekt.get<Database>()
+            val uiPreferences = Injekt.get<UiPreferences>()
+            uiPreferences.migrateNavStyle()
+            Injekt.get<NetworkHelper>()
+            Injekt.get<eu.kanade.tachiyomi.extension.ExtensionManager>()
+            Injekt.get<SourceManager>()
+            Injekt.get<DownloadManager>()
+            Injekt.get<eu.kanade.tachiyomi.data.download.DownloadCache>()
+            Injekt.get<eu.kanade.tachiyomi.data.cache.ChapterCache>()
+            Injekt.get<eu.kanade.tachiyomi.data.cache.CoverCache>()
+            Injekt.get<CustomAnimeRepository>()
+
+            // ANZ -->
+            // Eagerly warm Coil ImageLoader & diskCache so the first scroll frame never
+            // freezes on Okio journal initialization or component registry creation.
+            try { // ANZ
+                val imageLoader = coil3.SingletonImageLoader.get(this@App)
+                imageLoader.diskCache
+            } catch (_: Throwable) {
+            }
+            // ANZ <--
+
+            // Dismiss stuck downloader notifications
+            val downloadManager = Injekt.get<DownloadManager>()
+            withUIContext<Unit> {
+                downloadManager.dismissNotifications()
+            }
+
+            val syncPreferences: SyncPreferences = Injekt.get()
+            val syncTriggerOpt = syncPreferences.getSyncTriggerOptions()
+            if (syncPreferences.isSyncEnabled() && syncTriggerOpt.syncOnAppStart) {
+                SyncDataJob.startNow(this@App)
+            }
+        }
+
+        TelemetryConfig.init(
+            applicationContext,
+            isPreviewBuildType,
+            BuildConfig.COMMIT_COUNT,
+        )
+
+        if (isDebugBuildType) Timber.plant(Timber.DebugTree())
+
+        GlobalExceptionHandler.initialize(applicationContext, CrashActivity::class.java)
+
+        // TLS 1.3 support for Android < 10
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            Security.insertProviderAt(Conscrypt.newProvider(), 1)
+        }
+
+        // Avoid potential crashes
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val process = getProcessName()
+            if (packageName != process) WebView.setDataDirectorySuffix(process)
+        }
+
+        // ANZ -->
+        try { // ANZ
+            WebViewUtil.supportsWebView(this)
+        } catch (_: Throwable) {
+        } finally {
+            chromiumInitialized = true
+        }
+        // ANZ <--
+
+        ProcessLifecycleOwner.get().lifecycle.addObserver(this)
+
+        val scope = ProcessLifecycleOwner.get().lifecycleScope
+
+        // Show notification to disable Incognito Mode when it's enabled
+        basePreferences.incognitoMode().changes()
+            .onEach { enabled ->
+                if (enabled) {
+                    disableIncognitoReceiver.register()
+                    notify(
+                        Notifications.ID_INCOGNITO_MODE,
+                        Notifications.CHANNEL_INCOGNITO_MODE,
+                    ) {
+                        setContentTitle(stringResource(MR.strings.pref_incognito_mode))
+                        setContentText(stringResource(MR.strings.notification_incognito_text))
+                        setSmallIcon(R.drawable.ic_glasses_24dp)
+                        setOngoing(true)
+
+                        val pendingIntent = PendingIntent.getBroadcast(
+                            this@App,
+                            0,
+                            Intent(ACTION_DISABLE_INCOGNITO_MODE),
+                            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
+                        )
+                        setContentIntent(pendingIntent)
+                    }
+                } else {
+                    disableIncognitoReceiver.unregister()
+                    cancelNotification(Notifications.ID_INCOGNITO_MODE)
+                }
+            }
+            .launchIn(scope)
+
+        privacyPreferences.analytics()
+            .changes()
+            .onEach(TelemetryConfig::setAnalyticsEnabled)
+            .launchIn(scope)
+
+        privacyPreferences.crashlytics()
+            .changes()
+            .onEach(TelemetryConfig::setCrashlyticsEnabled)
+            .launchIn(scope)
+
+        setAppCompatDelegateThemeMode(Injekt.get<UiPreferences>().themeMode().get())
+
+        // Updates widget update
+        WidgetManager(Injekt.get(), Injekt.get()).apply { init(scope) }
+    }
+
+    private fun initializeMigrator() {
+        val preferenceStore = Injekt.get<PreferenceStore>()
+        val preference = preferenceStore.getInt(Preference.appStateKey("last_version_code"), 0)
+        logcat { "Migration from ${preference.get()} to ${BuildConfig.VERSION_CODE}" }
+        Migrator.initialize(
+            old = preference.get(),
+            new = BuildConfig.VERSION_CODE,
+            migrations = migrations,
+            onMigrationComplete = {
+                logcat { "Updating last version to ${BuildConfig.VERSION_CODE}" }
+                preference.set(BuildConfig.VERSION_CODE)
+            },
+        )
+    }
+
+    override fun newImageLoader(context: Context): ImageLoader {
+        return ImageLoader.Builder(this).apply {
+            val callFactoryLazy = lazy { Injekt.get<NetworkHelper>().client }
+            components {
+                add(OkHttpNetworkFetcherFactory(callFactoryLazy::value))
+                add(TachiyomiImageDecoder.Factory())
+                add(BufferedSourceFetcher.Factory())
+                add(AnimeCoverFetcher.AnimeCoverFactory(callFactoryLazy))
+                add(AnimeCoverFetcher.AnimeFactory(callFactoryLazy))
+                add(AnimeCoverFetcher.AnimeBackgroundFactory(callFactoryLazy))
+                add(AnimeCoverKeyer())
+                add(AnimeBackgroundKeyer())
+                add(AnimeKeyer())
+            }
+
+            // ANZ -->
+            crossfade((300 * this@App.animatorDurationScale).toInt()) // ANZ
+            allowRgb565(true) // ANZ
+            // ANZ <--
+            if (networkPreferences.verboseLogging().get()) logger(DebugLogger())
+
+            memoryCache {
+                MemoryCache.Builder()
+                    .maxSizePercent(this@App, 0.25) // Balanced 25% RAM allocation for stability
+                    .build()
+            }
+            diskCache {
+                DiskCache.Builder()
+                    .directory(this@App.cacheDir.resolve("image_cache").absolutePath.toPath())
+                    .maxSizeBytes(500L * 1024 * 1024) // Maintain 500MB disk cache for high retention
+                    .build()
+            }
+
+            // ANZ -->
+            fetcherCoroutineContext(Dispatchers.IO.limitedParallelism(8)) // ANZ
+            decoderCoroutineContext(Dispatchers.IO.limitedParallelism(3)) // ANZ
+            // ANZ <--
+        }.build()
+    }
+
+    override fun onStart(owner: LifecycleOwner) {
+        SecureActivityDelegate.onApplicationStart()
+
+        val syncPreferences: SyncPreferences = Injekt.get()
+        val syncTriggerOpt = syncPreferences.getSyncTriggerOptions()
+        if (syncPreferences.isSyncEnabled() && syncTriggerOpt.syncOnAppResume) {
+            SyncDataJob.startNow(this@App)
+        }
+
+        DiscordRPCService.start(applicationContext)
+    }
+
+    override fun onStop(owner: LifecycleOwner) {
+        SecureActivityDelegate.onApplicationStopped()
+
+        // Persist any cover colors/ratios extracted but not yet flushed by the debounce.
+        CoverColorObserver.flush()
+
+        DiscordRPCService.stop(applicationContext)
+    }
+
+    // ANZ -->
+    @Volatile
+    private var chromiumInitialized = false
+    private val spoofedPackageName by lazy { WebViewUtil.spoofedPackageName(this) }
+
+    override fun getPackageName(): String { // ANZ
+        if (chromiumInitialized || Looper.myLooper() != Looper.getMainLooper()) {
+            return super.getPackageName()
+        }
+        try {
+            val stackTrace = Throwable().stackTrace
+            val checkLimit = minOf(stackTrace.size, 6)
+            for (i in 0 until checkLimit) {
+                val element = stackTrace[i]
+                if (element.className.contains("chromium", ignoreCase = true)) {
+                    chromiumInitialized = true
+                    return spoofedPackageName ?: super.getPackageName()
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        return super.getPackageName()
+    }
+    // ANZ <--
+
+    private fun setupNotificationChannels() {
+        try {
+            Notifications.createChannels(this)
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR, e) { "Failed to modify notification channels" }
+        }
+    }
+
+    private fun setupExhLogging() {
+        EHLogLevel.init(this)
+
+        val logLevel = when {
+            EHLogLevel.shouldLog(EHLogLevel.EXTREME) -> LogLevel.ALL
+            EHLogLevel.shouldLog(EHLogLevel.EXTRA) || isDebugBuildType -> LogLevel.DEBUG
+            else -> LogLevel.WARN
+        }
+
+        val logConfig = LogConfiguration.Builder()
+            .logLevel(logLevel)
+            .disableStackTrace()
+            .disableBorder()
+            .build()
+
+        val printers = mutableListOf<Printer>(AndroidPrinter())
+
+        val storageManager = Injekt.get<StorageManager>()
+        val logFolder = runCatching { storageManager.getLogsDirectory() }.getOrNull()
+            ?: run {
+                val internalDir = File(cacheDir, "logs")
+                if (!internalDir.exists()) internalDir.mkdirs()
+                UniFile.fromFile(internalDir)
+            }
+
+        if (logFolder != null) {
+            val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
+
+            printers += EnhancedFilePrinter
+                .Builder(logFolder) {
+                    fileNameGenerator = object : DateFileNameGenerator() {
+                        override fun generateFileName(logLevel: Int, timestamp: Long): String {
+                            return super.generateFileName(
+                                logLevel,
+                                timestamp,
+                            ) + "-${BuildConfig.BUILD_TYPE}.log"
+                        }
+                    }
+                    flattener { timeMillis, level, tag, message ->
+                        "${dateFormat.format(timeMillis)} ${LogLevel.getShortLevelName(level)}/$tag: $message"
+                    }
+                    backupStrategy = NeverBackupStrategy()
+                }
+        }
+
+        if (!isDebugBuildType) {
+            printers += CrashlyticsPrinter(LogLevel.ERROR)
+        }
+
+        XLog.init(
+            logConfig,
+            *printers.toTypedArray(),
+        )
+
+        xLogD("Application booting...")
+    }
+
+    private inner class DisableIncognitoReceiver : BroadcastReceiver() {
+        private var registered = false
+
+        override fun onReceive(context: Context, intent: Intent) {
+            basePreferences.incognitoMode().set(false)
+        }
+
+        fun register() {
+            if (!registered) {
+                ContextCompat.registerReceiver(
+                    this@App,
+                    this,
+                    IntentFilter(ACTION_DISABLE_INCOGNITO_MODE),
+                    ContextCompat.RECEIVER_NOT_EXPORTED,
+                )
+                registered = true
+            }
+        }
+
+        fun unregister() {
+            if (registered) {
+                unregisterReceiver(this)
+                registered = false
+            }
+        }
+    }
+}
+
+private const val ACTION_DISABLE_INCOGNITO_MODE = "tachi.action.DISABLE_INCOGNITO_MODE"

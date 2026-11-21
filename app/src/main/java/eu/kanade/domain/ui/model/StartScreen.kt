@@ -1,0 +1,19 @@
+package eu.kanade.domain.ui.model
+
+import dev.icerock.moko.resources.StringResource
+import eu.kanade.presentation.util.Tab
+import eu.kanade.tachiyomi.ui.browse.BrowseTab
+import eu.kanade.tachiyomi.ui.history.HistoryTab
+import eu.kanade.tachiyomi.ui.home.FeedTab
+import eu.kanade.tachiyomi.ui.library.LibraryTab
+import eu.kanade.tachiyomi.ui.updates.UpdatesTab
+import tachiyomi.i18n.MR
+import tachiyomi.i18n.sy.SYMR
+
+enum class StartScreen(val titleRes: StringResource, val tab: Tab) {
+    LIBRARY(MR.strings.label_library, LibraryTab),
+    FEED(SYMR.strings.feed, FeedTab),
+    UPDATES(MR.strings.label_recent_updates, UpdatesTab),
+    HISTORY(MR.strings.label_recent_manga, HistoryTab),
+    BROWSE(MR.strings.browse, BrowseTab),
+}

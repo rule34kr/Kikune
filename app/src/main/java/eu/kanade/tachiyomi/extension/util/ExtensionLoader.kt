@@ -1,0 +1,533 @@
+package eu.kanade.tachiyomi.extension.util
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.pm.PackageInfoCompat
+import dalvik.system.PathClassLoader
+import eu.kanade.domain.extension.interactor.TrustExtension
+import eu.kanade.domain.source.service.SourcePreferences
+import eu.kanade.tachiyomi.extension.model.Extension
+import eu.kanade.tachiyomi.extension.model.LoadResult
+import eu.kanade.tachiyomi.source.CatalogueSource
+import eu.kanade.tachiyomi.source.Source
+import eu.kanade.tachiyomi.source.SourceFactory
+import eu.kanade.tachiyomi.util.lang.Hash
+import eu.kanade.tachiyomi.util.storage.copyAndSetReadOnlyTo
+import eu.kanade.tachiyomi.util.system.ChildFirstPathClassLoader
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import logcat.LogPriority
+import tachiyomi.core.common.util.system.logcat
+import uy.kohesive.injekt.injectLazy
+import java.io.File
+
+/**
+ * Class that handles the loading of the extensions installed in the system.
+ */
+@SuppressLint("PackageManagerGetSignatures")
+object ExtensionLoader {
+
+    private val preferences: SourcePreferences by injectLazy()
+    private val trustExtension: TrustExtension by injectLazy()
+    private val loadNsfwSource by lazy {
+        preferences.showNsfwSource().get()
+    }
+
+    private const val EXTENSION_FEATURE = "tachiyomi.animeextension"
+    private const val METADATA_SOURCE_CLASS = "tachiyomi.animeextension.class"
+    private const val METADATA_SOURCE_FACTORY = "tachiyomi.animeextension.factory"
+    private const val METADATA_NSFW = "tachiyomi.animeextension.nsfw"
+    private const val METADATA_HAS_README = "tachiyomi.animeextension.hasReadme"
+    private const val METADATA_HAS_CHANGELOG = "tachiyomi.animeextension.hasChangelog"
+    private const val METADATA_TORRENT = "tachiyomi.animeextension.torrent"
+
+    private const val METADATA_NAME = "aniyomix.name"
+    private const val METADATA_EXTENSION_LIB = "aniyomix.extensionLib"
+    private const val METADATA_CONTENT_WARNING = "aniyomix.contentWarning"
+    private const val METADATA_IS_TORRENT = "aniyomix.torrent"
+
+    const val LIB_VERSION_MIN = 12
+    const val LIB_VERSION_MAX = 17
+
+    @Suppress("DEPRECATION")
+    private val PACKAGE_FLAGS = PackageManager.GET_CONFIGURATIONS or
+        PackageManager.GET_META_DATA or
+        PackageManager.GET_SIGNATURES or
+        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) PackageManager.GET_SIGNING_CERTIFICATES else 0)
+
+    const val PRIVATE_EXTENSION_EXTENSION = "ext"
+
+    fun getPrivateExtensionDir(context: Context) = File(context.filesDir, "exts")
+
+    fun installPrivateExtensionFile(context: Context, file: File): Boolean {
+        val extension = context.packageManager.getPackageArchiveInfo(
+            file.absolutePath,
+            PACKAGE_FLAGS,
+        )
+            ?.takeIf { isPackageAnExtension(it) } ?: return false
+        val currentExtension = getExtensionPackageInfoFromPkgName(
+            context,
+            extension.packageName,
+        )
+
+        if (currentExtension != null) {
+            if (PackageInfoCompat.getLongVersionCode(extension) <
+                PackageInfoCompat.getLongVersionCode(currentExtension)
+            ) {
+                logcat(LogPriority.ERROR) { "Installed extension version is higher. Downgrading is not allowed." }
+                return false
+            }
+
+            val extensionSignatures = getSignatures(extension)
+            if (extensionSignatures.isNullOrEmpty()) {
+                logcat(LogPriority.ERROR) { "Extension to be installed is not signed." }
+                return false
+            }
+
+            if (!extensionSignatures.containsAll(getSignatures(currentExtension)!!)) {
+                logcat(LogPriority.ERROR) { "Installed extension signature is not matched." }
+                return false
+            }
+        }
+
+        val target = File(
+            getPrivateExtensionDir(context),
+            "${extension.packageName}.$PRIVATE_EXTENSION_EXTENSION",
+        )
+        return try {
+            target.delete()
+            file.copyAndSetReadOnlyTo(target, overwrite = true)
+            if (currentExtension != null) {
+                ExtensionInstallReceiver.notifyReplaced(context, extension.packageName)
+            } else {
+                ExtensionInstallReceiver.notifyAdded(context, extension.packageName)
+            }
+            true
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR, e) { "Failed to copy extension file." }
+            target.delete()
+            false
+        }
+    }
+
+    fun uninstallPrivateExtension(context: Context, pkgName: String) {
+        File(getPrivateExtensionDir(context), "$pkgName.$PRIVATE_EXTENSION_EXTENSION").delete()
+    }
+
+    /**
+     * Return a list of all the available extensions initialized concurrently.
+     *
+     * This function is main-safe: PackageManager queries (getInstalledPackages with
+     * signature/metadata flags), APK manifest parsing and dex class loading all happen
+     * on Dispatchers.IO. Calling it from the main thread used to freeze the whole UI
+     * for ~0.5s on mid-range devices (PackageManager binder + parse work), no matter
+     * which screen the user was on.
+     *
+     * @param context The application context.
+     */
+    suspend fun loadExtensions(context: Context): List<LoadResult> = withContext(Dispatchers.IO) {
+        val pkgManager = context.packageManager
+
+        val installedPkgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pkgManager.getInstalledPackages(
+                PackageManager.PackageInfoFlags.of(PACKAGE_FLAGS.toLong()),
+            )
+        } else {
+            pkgManager.getInstalledPackages(PACKAGE_FLAGS)
+        }
+
+        val sharedExtPkgs = installedPkgs
+            .asSequence()
+            .filter { isPackageAnExtension(it) }
+            .map { ExtensionInfo(packageInfo = it, isShared = true) }
+
+        // Materialized once: this pipeline touches the filesystem and parses each APK's manifest,
+        // so it must not be re-evaluated for every package during deduplication below.
+        val privateExtPkgs = getPrivateExtensionDir(context)
+            .listFiles()
+            ?.asSequence()
+            ?.filter { it.isFile && it.extension == PRIVATE_EXTENSION_EXTENSION }
+            ?.mapNotNull {
+                // Just in case, since Android 14+ requires them to be read-only
+                if (it.canWrite()) {
+                    it.setReadOnly()
+                }
+
+                val path = it.absolutePath
+                pkgManager.getPackageArchiveInfo(path, PACKAGE_FLAGS)
+                    ?.apply { applicationInfo!!.fixBasePaths(path) }
+            }
+            ?.filter { isPackageAnExtension(it) }
+            ?.map { ExtensionInfo(packageInfo = it, isShared = false) }
+            ?.toList()
+            .orEmpty()
+
+        // Only unambiguous package names are kept, matching the previous singleOrNull lookup.
+        val privateExtPkgsByName = privateExtPkgs
+            .groupBy { it.packageInfo.packageName }
+            .mapNotNull { (packageName, infos) -> infos.singleOrNull()?.let { packageName to it } }
+            .toMap()
+
+        val extPkgs = (sharedExtPkgs + privateExtPkgs.asSequence())
+            // Remove duplicates. Shared takes priority than private by default
+            .distinctBy { it.packageInfo.packageName }
+            // Compare version number
+            .mapNotNull { sharedPkg ->
+                val privatePkg = privateExtPkgsByName[sharedPkg.packageInfo.packageName]
+                selectExtensionPackage(sharedPkg, privatePkg)
+            }
+            .toList()
+
+        if (extPkgs.isEmpty()) return@withContext emptyList()
+
+        // Load each extension concurrently and wait for completion
+        coroutineScope {
+            val deferred = extPkgs.map {
+                async { loadExtension(context, it) }
+            }
+            deferred.awaitAll()
+        }
+    }
+
+    /**
+     * Attempts to load an extension from the given package name. It checks if the extension
+     * contains the required feature flag before trying to load it.
+     *
+     * Main-safe: delegates to [loadExtensions]-style IO work (PackageManager + class loading).
+     */
+    suspend fun loadExtensionFromPkgName(context: Context, pkgName: String): LoadResult = withContext(Dispatchers.IO) {
+        val extensionPackage = getExtensionInfoFromPkgName(context, pkgName)
+        if (extensionPackage == null) {
+            logcat(LogPriority.ERROR) { "Extension package is not found ($pkgName)" }
+            return@withContext LoadResult.Error
+        }
+        loadExtension(context, extensionPackage)
+    }
+
+    fun getExtensionPackageInfoFromPkgName(context: Context, pkgName: String): PackageInfo? {
+        return getExtensionInfoFromPkgName(context, pkgName)?.packageInfo
+    }
+
+    private fun getExtensionInfoFromPkgName(context: Context, pkgName: String): ExtensionInfo? {
+        val privateExtensionFile = File(
+            getPrivateExtensionDir(context),
+            "$pkgName.$PRIVATE_EXTENSION_EXTENSION",
+        )
+        val privatePkg = if (privateExtensionFile.isFile) {
+            context.packageManager.getPackageArchiveInfo(
+                privateExtensionFile.absolutePath,
+                PACKAGE_FLAGS,
+            )
+                ?.takeIf { isPackageAnExtension(it) }
+                ?.let {
+                    it.applicationInfo!!.fixBasePaths(privateExtensionFile.absolutePath)
+                    ExtensionInfo(
+                        packageInfo = it,
+                        isShared = false,
+                    )
+                }
+        } else {
+            null
+        }
+
+        val sharedPkg = try {
+            context.packageManager.getPackageInfo(pkgName, PACKAGE_FLAGS)
+                .takeIf { isPackageAnExtension(it) }
+                ?.let {
+                    ExtensionInfo(
+                        packageInfo = it,
+                        isShared = true,
+                    )
+                }
+        } catch (error: PackageManager.NameNotFoundException) {
+            null
+        }
+
+        return selectExtensionPackage(sharedPkg, privatePkg)
+    }
+
+    /**
+     * Loads an extension
+     *
+     * @param context The application context.
+     * @param extensionInfo The extension to load.
+     */
+    private suspend fun loadExtension(context: Context, extensionInfo: ExtensionInfo): LoadResult {
+        val pkgManager = context.packageManager
+
+        val pkgInfo = extensionInfo.packageInfo
+        val appInfo = pkgInfo.applicationInfo!!
+        val pkgName = pkgInfo.packageName
+
+        val extName = appInfo.metaData?.getString(METADATA_NAME)
+            ?: appInfo.metaData?.getString("tachiyomix.name")
+            ?: pkgManager.getApplicationLabel(appInfo).toString().substringAfter("Aniyomi: ")
+        val versionName = pkgInfo.versionName
+        val versionCode = PackageInfoCompat.getLongVersionCode(pkgInfo)
+
+        if (versionName.isNullOrEmpty()) {
+            logcat(LogPriority.WARN) { "Missing versionName for extension $extName" }
+            return LoadResult.Error
+        }
+
+        // Validate lib version
+        // ANZ -->
+        val libVersion = (
+            appInfo.metaData?.getInt(METADATA_EXTENSION_LIB)?.takeUnless { it == 0 }?.toDouble()
+                ?: appInfo.metaData?.getInt("tachiyomix.extensionLib")?.takeUnless { it == 0 }?.toDouble()
+                ?: (appInfo.metaData?.get(METADATA_EXTENSION_LIB) ?: appInfo.metaData?.get("tachiyomix.extensionLib"))?.let {
+                    when (it) {
+                        is Int -> if (it != 0) it.toDouble() else null
+                        is Float -> it.toDouble()
+                        is Double -> it
+                        is String -> it.toDoubleOrNull()
+                        else -> null
+                    }
+                }
+            ) ?: versionName.substringBeforeLast('.').toDoubleOrNull()
+        if (libVersion == null || libVersion < LIB_VERSION_MIN || libVersion >= LIB_VERSION_MAX + 1.0) {
+            logcat(LogPriority.WARN) {
+                "Lib version is $libVersion, while only versions " +
+                    "$LIB_VERSION_MIN to $LIB_VERSION_MAX are allowed"
+            }
+            return LoadResult.Error
+        }
+        // ANZ <--
+
+        val signatures = getSignatures(pkgInfo)
+        if (signatures.isNullOrEmpty()) {
+            logcat(LogPriority.WARN) { "Package $pkgName isn't signed" }
+            return LoadResult.Error
+        } else if (!trustExtension.isTrusted(pkgInfo, signatures)) {
+            val extension = Extension.Untrusted(
+                extName,
+                pkgName,
+                versionName,
+                versionCode,
+                libVersion,
+                signatures.last(),
+            )
+            logcat(LogPriority.WARN, message = { "Extension $pkgName isn't trusted" })
+            return LoadResult.Untrusted(extension)
+        }
+
+        val isNsfw = (appInfo.metaData?.getInt(METADATA_CONTENT_WARNING) ?: appInfo.metaData?.getInt("tachiyomix.contentWarning") ?: 0) > 0 ||
+            when (val v = appInfo.metaData?.get(METADATA_NSFW)) {
+                is Int -> v == 1
+                is Boolean -> v
+                is String -> v.toBoolean() || v == "1"
+                else -> false
+            }
+        if (!loadNsfwSource && isNsfw) {
+            logcat(LogPriority.WARN) { "NSFW extension $pkgName not allowed" }
+            return LoadResult.Error
+        }
+
+        val isTorrent = appInfo.metaData?.getBoolean(METADATA_IS_TORRENT) == true ||
+            when (val v = appInfo.metaData?.get(METADATA_TORRENT)) {
+                is Int -> v == 1
+                is Boolean -> v
+                is String -> v.toBoolean() || v == "1"
+                else -> false
+            }
+
+        val classLoader = try {
+            ChildFirstPathClassLoader(appInfo.sourceDir, null, context.classLoader)
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR, e) { "Extension load error: $extName ($pkgName)" }
+            return LoadResult.Error
+        }
+
+        val sources = appInfo.metaData.getString(METADATA_SOURCE_CLASS)!!
+            .split(";")
+            .map {
+                val sourceClass = it.trim()
+                if (sourceClass.startsWith(".")) {
+                    pkgInfo.packageName + sourceClass
+                } else {
+                    sourceClass
+                }
+            }
+            .flatMap {
+                try {
+                    val obj = Class.forName(it, false, classLoader).getDeclaredConstructor().newInstance()
+                    when (obj) {
+                        is Source -> {
+                            logcat { "Extension loaded source: ${obj.name}" }
+                            listOf(obj)
+                        }
+                        is SourceFactory -> {
+                            logcat { "Extension loaded factory: ${obj.javaClass.simpleName}" }
+                            try {
+                                obj.createSources()
+                            } catch (e: AbstractMethodError) {
+                                logcat(LogPriority.WARN, e) { "SourceFactory.createSources() failed (AbstractMethodError). Attempting reflection fallback." }
+                                val method = obj.javaClass.methods.find { m ->
+                                    m.parameterTypes.isEmpty() && List::class.java.isAssignableFrom(m.returnType)
+                                } ?: throw e
+                                @Suppress("UNCHECKED_CAST")
+                                method.invoke(obj) as List<Source>
+                            }
+                        }
+                        else -> {
+                            logcat(LogPriority.ERROR) { "Unknown source class type: ${obj.javaClass}" }
+                            throw Exception("Unknown source class type: ${obj.javaClass}")
+                        }
+                    }
+                } catch (e: LinkageError) {
+                    try {
+                        val fallBackClassLoader = PathClassLoader(appInfo.sourceDir, null, context.classLoader)
+                        val obj = Class.forName(
+                            it,
+                            false,
+                            fallBackClassLoader,
+                        ).getDeclaredConstructor().newInstance()
+                        when (obj) {
+                            is Source -> {
+                                logcat { "Extension loaded source (fallback): ${obj.name}" }
+                                listOf(obj)
+                            }
+                            is SourceFactory -> {
+                                logcat { "Extension loaded factory (fallback): ${obj.javaClass.simpleName}" }
+                                try {
+                                    obj.createSources()
+                                } catch (e: AbstractMethodError) {
+                                    logcat(LogPriority.WARN, e) { "SourceFactory.createSources() failed (AbstractMethodError) in fallback. Attempting reflection fallback." }
+                                    val method = obj.javaClass.methods.find { m ->
+                                        m.parameterTypes.isEmpty() && List::class.java.isAssignableFrom(m.returnType)
+                                    } ?: throw e
+                                    @Suppress("UNCHECKED_CAST")
+                                    method.invoke(obj) as List<Source>
+                                }
+                            }
+                            else -> {
+                                logcat(LogPriority.ERROR) { "Unknown source class type (fallback): ${obj.javaClass}" }
+                                throw Exception("Unknown source class type: ${obj.javaClass}")
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        logcat(LogPriority.ERROR, e) { "Extension load error: $extName ($it)" }
+                        return LoadResult.Error
+                    }
+                } catch (e: Throwable) {
+                    logcat(LogPriority.ERROR, e) { "Extension load error: $extName ($it)" }
+                    return LoadResult.Error
+                }
+            }
+
+        val langs = sources.filterIsInstance<CatalogueSource>()
+            .map { it.lang }
+            .toSet()
+        val lang = when (langs.size) {
+            0 -> ""
+            1 -> langs.first()
+            else -> "all"
+        }
+
+        val contentWarning = when (appInfo.metaData?.getInt(METADATA_CONTENT_WARNING) ?: appInfo.metaData?.getInt("tachiyomix.contentWarning")) {
+            1 -> eu.kanade.tachiyomi.extension.model.ContentWarning.MIXED
+            2 -> eu.kanade.tachiyomi.extension.model.ContentWarning.NSFW
+            0 -> if (isNsfw) eu.kanade.tachiyomi.extension.model.ContentWarning.NSFW else eu.kanade.tachiyomi.extension.model.ContentWarning.SAFE
+            else -> if (isNsfw) eu.kanade.tachiyomi.extension.model.ContentWarning.NSFW else eu.kanade.tachiyomi.extension.model.ContentWarning.UNSPECIFIED
+        }
+
+        val extension = Extension.Installed(
+            name = extName,
+            pkgName = pkgName,
+            versionName = versionName,
+            versionCode = versionCode,
+            libVersion = libVersion,
+            lang = lang,
+            isNsfw = isNsfw,
+            isTorrent = isTorrent,
+            sources = sources,
+            pkgFactory = when (val v = appInfo.metaData?.get(METADATA_SOURCE_FACTORY)) {
+                is String -> v
+                else -> null
+            },
+            icon = appInfo.loadIcon(pkgManager),
+            isShared = extensionInfo.isShared,
+            signatureHash = signatures.last(),
+            contentWarning = contentWarning,
+        )
+        return LoadResult.Success(extension)
+    }
+
+    /**
+     * Choose which extension package to use based on version code
+     *
+     * @param shared extension installed to system
+     * @param private extension installed to data directory
+     */
+    private fun selectExtensionPackage(shared: ExtensionInfo?, private: ExtensionInfo?): ExtensionInfo? {
+        when {
+            private == null && shared != null -> return shared
+            shared == null && private != null -> return private
+            shared == null && private == null -> return null
+        }
+
+        return if (PackageInfoCompat.getLongVersionCode(shared!!.packageInfo) >=
+            PackageInfoCompat.getLongVersionCode(private!!.packageInfo)
+        ) {
+            shared
+        } else {
+            private
+        }
+    }
+
+    /**
+     * Returns true if the given package is an extension.
+     *
+     * @param pkgInfo The package info of the application.
+     */
+    private fun isPackageAnExtension(pkgInfo: PackageInfo): Boolean {
+        return pkgInfo.reqFeatures.orEmpty().any { it.name == EXTENSION_FEATURE }
+    }
+
+    /**
+     * Returns the signatures of the package or null if it's not signed.
+     *
+     * @param pkgInfo The package info of the application.
+     * @return List SHA256 digest of the signatures
+     */
+    private fun getSignatures(pkgInfo: PackageInfo): List<String>? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = pkgInfo.signingInfo!!
+            if (signingInfo.hasMultipleSigners()) {
+                signingInfo.apkContentsSigners
+            } else {
+                signingInfo.signingCertificateHistory
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            pkgInfo.signatures
+        }
+            ?.map { Hash.sha256(it.toByteArray()) }
+            ?.toList()
+    }
+
+    /**
+     * On Android 13+ the ApplicationInfo generated by getPackageArchiveInfo doesn't
+     * have sourceDir which breaks assets loading (used for getting icon here).
+     */
+    private fun ApplicationInfo.fixBasePaths(apkPath: String) {
+        if (sourceDir == null) {
+            sourceDir = apkPath
+        }
+        if (publicSourceDir == null) {
+            publicSourceDir = apkPath
+        }
+    }
+
+    private data class ExtensionInfo(
+        val packageInfo: PackageInfo,
+        val isShared: Boolean,
+    )
+}

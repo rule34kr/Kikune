@@ -1,0 +1,82 @@
+import kotlin.Boolean;
+
+CREATE TABLE extension_repos (
+    base_url TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    short_name TEXT,
+    website TEXT NOT NULL,
+    signing_key_fingerprint TEXT UNIQUE NOT NULL,
+    is_visible INTEGER AS Boolean NOT NULL DEFAULT 1,
+    author TEXT,
+    discord TEXT,
+    icon TEXT,
+    is_legacy INTEGER AS Boolean NOT NULL DEFAULT 1,
+    extension_list_url TEXT
+);
+
+findOne:
+SELECT *
+FROM extension_repos
+WHERE base_url = :base_url;
+
+findOneBySigningKeyFingerprint:
+SELECT *
+FROM extension_repos
+WHERE signing_key_fingerprint = :fingerprint;
+
+findAll:
+SELECT *
+FROM extension_repos;
+
+count:
+SELECT COUNT(*)
+FROM extension_repos;
+
+insert:
+INSERT INTO extension_repos(base_url, name, short_name, website, signing_key_fingerprint, is_visible, author, discord, icon, is_legacy, extension_list_url)
+VALUES (:base_url, :name, :short_name, :website, :fingerprint, :is_visible, :author, :discord, :icon, :is_legacy, :extension_list_url);
+
+upsert:
+INSERT INTO extension_repos(base_url, name, short_name, website, signing_key_fingerprint, is_visible, author, discord, icon, is_legacy, extension_list_url)
+VALUES (:base_url, :name, :short_name, :website, :fingerprint, :is_visible, :author, :discord, :icon, :is_legacy, :extension_list_url)
+ON CONFLICT(base_url)
+DO UPDATE
+SET
+    name = :name,
+    short_name = :short_name,
+    website =: website,
+    signing_key_fingerprint = :fingerprint,
+    is_visible = :is_visible,
+    author = :author,
+    discord = :discord,
+    icon = :icon,
+    is_legacy = :is_legacy,
+    extension_list_url = :extension_list_url
+WHERE base_url = base_url;
+
+replace:
+INSERT INTO extension_repos(base_url, name, short_name, website, signing_key_fingerprint, is_visible, author, discord, icon, is_legacy, extension_list_url)
+VALUES (:base_url, :name, :short_name, :website, :fingerprint, :is_visible, :author, :discord, :icon, :is_legacy, :extension_list_url)
+ON CONFLICT(signing_key_fingerprint)
+DO UPDATE
+SET
+    base_url = :base_url,
+    name = :name,
+    short_name = :short_name,
+    website =: website,
+    is_visible = :is_visible,
+    author = :author,
+    discord = :discord,
+    icon = :icon,
+    is_legacy = :is_legacy,
+    extension_list_url = :extension_list_url
+WHERE signing_key_fingerprint = signing_key_fingerprint;
+
+delete:
+DELETE FROM extension_repos
+WHERE base_url = :base_url;
+
+updateVisibility:
+UPDATE extension_repos
+SET is_visible = :is_visible
+WHERE base_url = :base_url;

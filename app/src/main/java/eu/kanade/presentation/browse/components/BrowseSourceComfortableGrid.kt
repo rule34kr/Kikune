@@ -1,0 +1,133 @@
+package eu.kanade.presentation.browse.components
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.unit.dp
+import androidx.paging.LoadState
+import androidx.paging.compose.LazyPagingItems
+import androidx.paging.compose.itemContentType
+import androidx.paging.compose.itemKey
+import eu.kanade.presentation.library.components.AnimeComfortableGridItem
+import eu.kanade.presentation.library.components.CommonAnimeItemDefaults
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.ImmutableSet
+import kotlinx.coroutines.flow.StateFlow
+import tachiyomi.domain.anime.model.Anime
+import tachiyomi.domain.anime.model.asAnimeCover
+import tachiyomi.presentation.core.util.plus
+
+@Composable
+fun BrowseSourceComfortableGrid(
+    animeList: LazyPagingItems<StateFlow<Anime>>,
+    columns: GridCells,
+    contentPadding: PaddingValues,
+    onAnimeClick: (Anime, Int) -> Unit,
+    onAnimeLongClick: (Anime, Int) -> Unit,
+    selection: ImmutableList<Anime>,
+    favoriteIds: ImmutableSet<Long>,
+    onBatchIncrement: (Int) -> Unit = {},
+    usePanorama: Boolean? = null,
+    firstItemFocusRequester: FocusRequester? = null,
+    selectedChipFocusRequester: FocusRequester? = null,
+    columnsCount: Int = 0,
+) {
+    val selectionIds = remember(selection) { selection.map { it.id }.toSet() }
+    LazyVerticalGrid(
+        columns = columns,
+        contentPadding = contentPadding + PaddingValues(8.dp),
+        verticalArrangement = Arrangement.spacedBy(CommonAnimeItemDefaults.GridVerticalSpacer),
+        horizontalArrangement = Arrangement.spacedBy(CommonAnimeItemDefaults.GridHorizontalSpacer),
+    ) {
+        if (animeList.loadState.prepend is LoadState.Loading) {
+            item(key = "browse-grid-comfortable-load-prepend", span = { GridItemSpan(maxLineSpan) }) {
+                BrowseSourceLoadingItem()
+            }
+        }
+
+        // ANZ -->
+        items(
+            count = animeList.itemCount,
+            key = animeList.itemKey { it.value.id },
+            contentType = animeList.itemContentType { "anime" },
+        ) { index ->
+            // ANZ <--
+            val animeFlow = animeList[index] ?: return@items
+            val anime = animeFlow.value
+            onBatchIncrement(index)
+
+            val currentOnAnimeClick = remember(onAnimeClick, anime.id, index) {
+                { onAnimeClick(anime, index) }
+            }
+            val currentOnAnimeLongClick = remember(onAnimeLongClick, anime.id, index) {
+                { onAnimeLongClick(anime, index) }
+            }
+
+            val topRowThreshold = if (columnsCount > 0) columnsCount else 6
+            val itemModifier = (if (index == 0 && firstItemFocusRequester != null) Modifier.focusRequester(firstItemFocusRequester) else Modifier)
+                .then(
+                    if (index < topRowThreshold && selectedChipFocusRequester != null) {
+                        Modifier.focusProperties {
+                            up = selectedChipFocusRequester
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
+
+            BrowseSourceComfortableGridItem(
+                anime = anime,
+                isFavorite = anime.id in favoriteIds,
+                isSelected = anime.id in selectionIds,
+                onClick = currentOnAnimeClick,
+                onLongClick = currentOnAnimeLongClick,
+                usePanorama = usePanorama,
+                modifier = itemModifier,
+            )
+        }
+
+        if (animeList.loadState.refresh is LoadState.Loading || animeList.loadState.append is LoadState.Loading) {
+            item(key = "browse-grid-comfortable-load-append", span = { GridItemSpan(maxLineSpan) }) {
+                BrowseSourceLoadingItem()
+            }
+        }
+    }
+}
+
+@Composable
+internal fun BrowseSourceComfortableGridItem(
+    anime: Anime,
+    isFavorite: Boolean,
+    isSelected: Boolean = false,
+    onClick: () -> Unit = {},
+    onLongClick: () -> Unit = onClick,
+    usePanorama: Boolean? = null,
+    modifier: Modifier = Modifier,
+) {
+    eu.kanade.tachiyomi.util.system.PerformanceBenchmarkHelper.countRecomposition("BrowseSourceComfortableGridItem")
+    val badgeStart: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = remember(isFavorite) {
+        { InLibraryBadge(enabled = isFavorite) }
+    }
+    AnimeComfortableGridItem(
+        modifier = modifier,
+        title = anime.title,
+        coverData = remember(anime.id, isFavorite) {
+            anime.asAnimeCover().copy(isAnimeFavorite = isFavorite)
+        },
+        coverAlpha = if (isFavorite) CommonAnimeItemDefaults.BrowseFavoriteCoverAlpha else 1f,
+        coverBadgeStart = badgeStart,
+        onLongClick = onLongClick,
+        onClick = onClick,
+        isSelected = isSelected,
+        usePanorama = usePanorama,
+    )
+}

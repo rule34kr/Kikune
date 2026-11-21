@@ -1,0 +1,200 @@
+build:
+  maxIssues: 0
+  excludeCorrectable: false
+  weights:
+    # complexity: 2
+    # LongParameterList: 1
+    # style: 1
+    # comments: 1
+
+complexity:
+  active: true
+  ComplexCondition:
+    active: true
+    threshold: 4
+  LongParameterList:
+    active: true
+    functionThreshold: 10
+    constructorThreshold: 10
+  TooManyFunctions:
+    active: true
+    thresholdInFiles: 30
+    thresholdInClasses: 25
+    thresholdInInterfaces: 20
+    thresholdInObjects: 25
+    thresholdInEnums: 20
+
+style:
+  active: true
+  ForbiddenImport:
+    active: true
+    imports:
+      - value: 'androidx.compose.material.*'
+        reason: 'Use Material 3 (androidx.compose.material3.*) instead of legacy Material 2.'
+      - value: 'androidx.compose.material.Button'
+        reason: 'Use Material 3 Button (androidx.compose.material3.Button) instead of Material 2.'
+      - value: 'androidx.compose.material.Surface'
+        reason: 'Use Material 3 Surface (androidx.compose.material3.Surface) instead of Material 2.'
+      - value: 'androidx.compose.material.Text'
+        reason: 'Use Material 3 Text (androidx.compose.material3.Text) instead of Material 2.'
+      - value: 'androidx.compose.material.Scaffold'
+        reason: 'Use Material 3 Scaffold (androidx.compose.material3.Scaffold) instead of Material 2.'
+      - value: 'androidx.compose.material.Card'
+        reason: 'Use Material 3 Card (androidx.compose.material3.Card) instead of Material 2.'
+      - value: 'androidx.compose.material.TopAppBar'
+        reason: 'Use Material 3 TopAppBar (androidx.compose.material3.TopAppBar) instead of Material 2.'
+      - value: 'androidx.compose.material.Tab'
+        reason: 'Use Material 3 Tab (androidx.compose.material3.Tab) instead of Material 2.'
+      - value: 'androidx.compose.material.Switch'
+        reason: 'Use Material 3 Switch (androidx.compose.material3.Switch) instead of Material 2.'
+      - value: 'androidx.compose.material.Checkbox'
+        reason: 'Use Material 3 Checkbox (androidx.compose.material3.Checkbox) instead of Material 2.'
+      - value: 'androidx.compose.material.Slider'
+        reason: 'Use Material 3 Slider (androidx.compose.material3.Slider) instead of Material 2.'
+      - value: 'androidx.compose.material.Divider'
+        reason: 'Use Material 3 HorizontalDivider (androidx.compose.material3.HorizontalDivider) instead of Material 2.'
+      - value: 'androidx.compose.material.ModalBottomSheet'
+        reason: 'Use Material 3 ModalBottomSheet (androidx.compose.material3.ModalBottomSheet) instead of Material 2.'
+      - value: 'androidx.compose.material.AlertDialog'
+        reason: 'Use Material 3 AlertDialog (androidx.compose.material3.AlertDialog) instead of Material 2.'
+      - value: 'androidx.compose.material.ListItem'
+        reason: 'Use Material 3 ListItem (androidx.compose.material3.ListItem) instead of Material 2.'
+      - value: 'androidx.compose.material.DropdownMenu'
+        reason: 'Use Material 3 DropdownMenu (androidx.compose.material3.DropdownMenu) instead of Material 2.'
+      - value: 'androidx.compose.material.Snackbar'
+        reason: 'Use Material 3 Snackbar (androidx.compose.material3.Snackbar) instead of Material 2.'
+  MagicNumber:
+    active: true
+    ignoreNumbers: [-1, 0, 1, 2]
+  WildcardImport:
+    active: true
+  MaxLineLength:
+    active: true
+    maxLineLength: 140
+  UnusedPrivateMember:
+    active: true
+    allowedNames: '(_|ignored|expected|serialVersionUID)'
+
+naming:
+  active: true
+  ClassNaming:
+    active: true
+    classPattern: '[A-Z][a-zA-Z0-9]*'
+  FunctionNaming:
+    active: true
+    functionPattern: '[a-z][a-zA-Z0-9]*'
+  VariableNaming:
+    active: true
+    variablePattern: '[a-z][a-zA-Z0-9]*'
+
+potential-bugs:
+  active: true
+  DuplicateCaseInWhenExpression:
+    active: true
+  EqualsAlwaysReturnsTrueOrFalse:
+    active: true
+  InvalidRange:
+    active: true
+  UnreachableCode:
+    active: true
+  UnusedUnaryOperator:
+    active: true
+
+coroutines:
+  active: true
+  GlobalCoroutineUsage:
+    active: true
+  RedundantSuspendModifier:
+    active: true
+  SleepPresent:
+    active: true
+  SuspendFunWithCoroutineScopeReceiver:
+    active: true
+
+exceptions:
+  active: true
+  CatchRuntimeException:
+    active: true
+  CatchThrowable:
+    active: true
+  InstanceOfCheckForException:
+    active: true
+  RethrowCaughtException:
+    active: true
+  ThrowingExceptionInMain:
+    active: true
+
+performance:
+  active: true
+  ArrayPrimitive:
+    active: true
+  ForEachOnRange:
+    active: true
+  SpreadOperator:
+    active: true
+  UnnecessaryTemporaryObject:
+    active: true
+
+Compose:
+  active: true
+  CompositionLocalAllowlist:
+    active: true
+    allowedCompositionLocals:
+      - LocalContext
+      - LocalConfiguration
+      - LocalDensity
+      - LocalFocusManager
+      - LocalLayoutDirection
+      - LocalSoftwareKeyboardController
+      - LocalUriHandler
+      - LocalView
+      - LocalWindowInfo
+      - LocalBackPress
+      - LocalPlayerButtonsClickEvent
+      - LocalPreferenceHighlighted
+      - LocalPreferenceMinHeight
+  ComposableNaming:
+    active: true
+  ComposableParamOrder:
+    active: true
+  ContentEmitterReturningValues:
+    active: true
+  ModifierClickableOrder:
+    active: true
+  ModifierComposable:
+    active: true
+  ModifierMissing:
+    active: true
+  ModifierReused:
+    active: true
+  MultipleContentEmitters:
+    active: true
+  MutableStateAutoboxing:
+    active: true
+  MutableStateWriteAfterRead:
+    active: true
+  ParameterNaming:
+    active: true
+  PreviewNaming:
+    active: true
+  PreviewPublic:
+    active: true
+  RememberMissing:
+    active: true
+  UnstableCollections:
+    active: true
+  ViewModelForwarding:
+    active: true
+  ViewModelInjection:
+    active: true
+
+formatting:
+  active: true
+  android: true
+  autoCorrect: true
+  NoWildcardImports:
+    active: true
+  Indentation:
+    active: true
+  FinalNewline:
+    active: true

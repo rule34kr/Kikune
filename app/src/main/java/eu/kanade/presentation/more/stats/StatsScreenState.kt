@@ -1,0 +1,28 @@
+package eu.kanade.presentation.more.stats
+
+import androidx.compose.runtime.Immutable
+import eu.kanade.presentation.more.stats.data.StatsData
+
+sealed interface StatsScreenState {
+    @Immutable
+    data object Loading : StatsScreenState
+
+    @Immutable
+    data class SuccessAnime(
+        val overview: StatsData.AnimeOverview,
+        val titles: StatsData.AnimeTitles,
+        val episodes: StatsData.Episodes,
+        val trackers: StatsData.Trackers,
+        val extensions: StatsData.ExtensionUsage,
+        val timeDistribution: StatsData.TimeDistribution,
+        val genreAffinity: StatsData.GenreAffinity,
+        val watchHabits: StatsData.WatchHabits,
+        val scores: StatsData.ScoreDistribution,
+        val statuses: StatsData.StatusBreakdown,
+        val feedActivity: StatsData.FeedActivity? = null,
+        val infrastructure: StatsData.InfrastructureAnalytics? = null,
+        val aiAnalysis: String? = null,
+        val isAiLoading: Boolean = false,
+        val streamingAnalysis: String? = null,
+    ) : StatsScreenState
+}
