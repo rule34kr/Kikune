@@ -28,7 +28,7 @@ jobs:
             -o /tmp/anizen.zip
           mkdir -p /tmp/anizen
           unzip -q /tmp/anizen.zip -d /tmp/anizen
-          rsync -a --exclude='README.md' /tmp/anizen/AniZen-master/ ./
+          rsync -a --exclude='README.md' --exclude='.github/workflows/' /tmp/anizen/AniZen-master/ ./
 
       - name: Apply Kikune identity and build compatibility
         shell: bash
